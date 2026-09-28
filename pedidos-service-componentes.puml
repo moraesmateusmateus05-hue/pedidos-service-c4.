@@ -1,0 +1,78 @@
+@startuml pedidos-service-componentes
+!include <C4/C4_Component>
+
+title C4 Nível 3 - Componentes do container pedidos-service (Node.js 20 + Express)
+
+LAYOUT_WITH_LEGEND()
+
+Person(cliente, "Cliente", "Usuário do app de delivery")
+Container_Ext(gateway, "API Gateway / App Cliente", "HTTPS", "Encaminha as requisições REST com o header Authorization: Bearer <JWT>")
+Container_Ext(authsvc, "auth-service", "Node.js (Aula 04)", "Emite o JWT; define o contrato de verificação")
+
+ContainerDb_Ext(db, "PostgreSQL", "PostgreSQL", "Armazena pedidos e itens")
+Container_Ext(broker, "RabbitMQ", "AMQP", "Broker de eventos da plataforma")
+System_Ext(maps, "API de mapas", "Google Maps Distance Matrix API")
+System_Ext(pgCartao, "Gateway de cartão", "Adquirente de cartão de crédito")
+System_Ext(pgPix, "PSP Pix", "Provedor de cobrança Pix")
+System_Ext(pgVale, "Operadora de vale-refeição", "Autorizador de vale-refeição")
+
+Container_Ext(notificacao, "notificacao-service", "Consumidor de PedidoConfirmado")
+Container_Ext(restaurante, "restaurante-service", "Consumidor de PedidoConfirmado")
+Container_Ext(entregadores, "entregadores-service", "Consumidor de PedidoConfirmado")
+
+Container_Boundary(pedidos, "pedidos-service") {
+
+  Component(verifyToken, "verifyToken", "Express middleware", "ADR-007: valida assinatura e expiração do JWT (mesmo contrato do auth-service); rejeita com 401 e injeta req.user")
+  Component(controller, "PedidosController", "Express Router", "Expõe a API REST de pedidos (POST/GET /pedidos); valida entrada e traduz HTTP <-> casos de uso")
+
+  Component(criarPedido, "CriarPedidoService", "Caso de uso (regra de negócio)", "Orquestra criação, cobrança, confirmação e publicação do evento. Depende apenas de abstrações (DIP/OCP); não conhece pg, amqplib, Maps nem provedores")
+
+  Component(repoPort, "PedidoRepository", "Interface (porta)", "ADR-008: contrato de persistência (salvar, buscarPorId, atualizarStatus)")
+  Component(repoPg, "PedidoRepositoryPostgres", "Adaptador - node-postgres (pg)", "Implementa PedidoRepository com SQL no PostgreSQL")
+
+  Component(pagStrategy, "PagamentoStrategy", "Interface (Strategy)", "ADR-009: contrato único: pagar(pedido, dadosPagamento) -> resultado")
+  Component(cartao, "CartaoCreditoStrategy", "Strategy concreta", "Cobra via gateway de cartão")
+  Component(pix, "PixStrategy", "Strategy concreta", "Gera e confirma cobrança Pix no PSP")
+  Component(vale, "ValeRefeicaoStrategy", "Strategy concreta", "Autoriza pagamento na operadora de vale-refeição")
+  Component(registry, "PagamentoStrategyRegistry", "Registro/Factory (composition root)", "Mapeia o código do meio de pagamento para a strategy registrada; novas strategies são apenas registradas aqui")
+
+  Component(taxaPort, "TaxaEntregaService", "Serviço de domínio + interface DistanciaGateway", "Calcula a taxa de entrega a partir da distância obtida pela porta DistanciaGateway")
+  Component(mapsAdapter, "MapsDistanceAdapter", "Adaptador - HTTP client", "ADR-011: implementa DistanciaGateway chamando a Distance Matrix API e traduzindo a resposta")
+
+  Component(publisherPort, "EventPublisher", "Interface (porta)", "Contrato de publicação de eventos de domínio")
+  Component(publisher, "PedidoEventPublisher", "Adaptador - amqplib", "ADR-010: publica PedidoConfirmado no exchange do RabbitMQ")
+}
+
+Rel(cliente, gateway, "Usa", "HTTPS")
+Rel(gateway, verifyToken, "Encaminha requisições com JWT", "HTTPS/JSON")
+Rel(authsvc, verifyToken, "Contrato do token (segredo/chave pública compartilhada)", "JWT")
+Rel(verifyToken, controller, "Repassa requisições autenticadas", "chamada de função")
+Rel(controller, criarPedido, "Invoca criarPedido(dto, usuario)", "chamada de função")
+
+Rel(criarPedido, repoPort, "Persiste e consulta pedidos")
+Rel(repoPg, repoPort, "Implementa", "DIP")
+Rel(repoPg, db, "Lê e grava pedidos", "SQL/TCP 5432")
+
+Rel(criarPedido, taxaPort, "Calcula taxa de entrega")
+Rel(mapsAdapter, taxaPort, "Implementa DistanciaGateway", "DIP")
+Rel(mapsAdapter, maps, "Consulta distância/tempo", "HTTPS/JSON")
+
+Rel(criarPedido, registry, "Obtém a strategy do meio escolhido")
+Rel(registry, pagStrategy, "Resolve instância de")
+Rel(criarPedido, pagStrategy, "Executa pagar()")
+Rel(cartao, pagStrategy, "Implementa", "OCP")
+Rel(pix, pagStrategy, "Implementa", "OCP")
+Rel(vale, pagStrategy, "Implementa", "OCP")
+Rel(cartao, pgCartao, "Autoriza cobrança", "HTTPS/JSON")
+Rel(pix, pgPix, "Cria/confirma cobrança", "HTTPS/JSON")
+Rel(vale, pgVale, "Autoriza pagamento", "HTTPS/JSON")
+
+Rel(criarPedido, publisherPort, "Publica PedidoConfirmado após confirmar")
+Rel(publisher, publisherPort, "Implementa", "DIP")
+Rel(publisher, broker, "Publica PedidoConfirmado", "AMQP")
+
+Rel_Back(notificacao, broker, "Consome PedidoConfirmado", "AMQP")
+Rel_Back(restaurante, broker, "Consome PedidoConfirmado", "AMQP")
+Rel_Back(entregadores, broker, "Consome PedidoConfirmado", "AMQP")
+
+@enduml
